@@ -65,6 +65,14 @@ class _port_usb(object):
 		return False
 
 
+# =================================================================
+# methods for working with angles
+# =================================================================
+
+# Return a number wrapped in the range [lo, hi)
+def wrap(a, lo, hi):
+	return np.mod(a - lo, hi - lo) + lo
+
 
 # =================================================================
 # handy methods
@@ -1458,9 +1466,11 @@ class Dorna(_port_usb, easy_method):
 		result = None
 		T = False
 		for joint in prm:
-			if all([T == False, joint in ["j3", "j4"]]):
-				result = self._home_joint_3_4()
-				T = True
+			if joint in ["j3", "j4"]:
+				# Only home 3 and 4 once
+				if not T:
+					result = self._home_joint_3_4()
+					T = True
 			else:	
 				result = self._home_joint(joint)
 		return result
@@ -1489,11 +1499,53 @@ class Dorna(_port_usb, easy_method):
 	{di4fn: 4}
 
 	G38.3
+
+	Homing Procedure Notes
+	[Procedure originally came with api.py, but rewritten by Ben Snell,
+	@bensnell on github.com]
+	- Requires that the constant probe_offset is correctly set. This constant
+		is an additional float value defined in the config.yaml file. This value
+		is set like such:
+		...
+		homing:
+			probe_offset: 30.0
+		...
+		This is a constant offset to the probing distance for these joints.
+		This value is different from one robot to another, and depends
+		on how the magnets in the wrist are aligned during the 
+		assembly process. The purpose of this constant is to ensure that 
+		joint 3 homes to the same value every time. This constant ensures that 
+		the values returned from probing are reliably offset each time
+		to result in the same homing calculations.
+	- Joint 3 homing is repeatable as long as j3 is pointed outward,
+		in the direction of its parent arm, within 90 degrees in
+		either direction. The outward direction of joint 3 looks like this:
+										  ___
+						_________________/   \__
+					  _/___  			|	  |	|
+		<---	---|-|__•__|-|			|  •  | |
+			   		   \________________|     |_|
+			   		   					|	  |
+			   		   					|	  |
+			   		   					|	  |
+	- Joint 4 homing is repeatable as long as it is kept within 180
+		degrees of zero. 
+	- In order for any homing procedure to work right now, neither of the
+		joint 3 or 4 red homing lights may be on
 	"""
 	def _home_joint_3_4(self):
 		_input = [3,4]
 		# set_joint
 		self.set_joint({"j3": 0, "j4": 0}, True)
+
+		# Get the probe offset
+		probe_offset = 0.0
+		if "homing" in self._config and "probe_offset" in self._config["homing"]:
+			tmp = self._config["homing"]["probe_offset"]
+			if type(tmp) == int or type(tmp) == float:
+				probe_offset = float(tmp)
+			else:
+				print("Probe offset was not defined correctly in \"config.yaml\"")
 
 		# remove all the probe inputs
 		for i in range(1,10):
@@ -1509,7 +1561,7 @@ class Dorna(_port_usb, easy_method):
 		if _result == None:
 			return None
 		_result = json.loads(_result)
-		t3 = - _result[4]
+		t3 = _result[4] - probe_offset
 
 		# back to where it started
 		command = {"command": "move", "prm": {"path": "joint", "movement": 0, "j4": 0, "speed": 5000}}
@@ -1536,7 +1588,7 @@ class Dorna(_port_usb, easy_method):
 		if _result == None:
 			return None
 		_result = json.loads(_result)
-		t4 = - _result[4]
+		t4 = -_result[4] - probe_offset
 
 		# back to where it started
 		command = {"command": "move", "prm": {"path": "joint", "movement": 0, "j4": 0, "speed": 5000}}
@@ -1548,12 +1600,13 @@ class Dorna(_port_usb, easy_method):
 		if not wait:
 			return None
 
-		travel = [-t3, -t4]
-		#joint = [0.5*(travel[1]-travel[0]), -0.5*(travel[1]+travel[0])]
-		joint = [0.5*(travel[1]-travel[0]), 0.5*(travel[1]+travel[0])]
-		# set_joint
-		#return self.set_joint({"j3": self._config["calibrate"]["j3"] + -(m4-m3)/2, "j4": self._config["calibrate"]["j4"] + (m4+m3)/2}, True)
-		return self.set_joint({"j3": self._config["calibrate"]["j3"] + joint[0], "j4": self._config["calibrate"]["j4"] + joint[1]}, True)
+		# Calculate the joint offsets
+		# j3 will be in the range [-90, 90)
+		# j4 will be in the range [-180, 180)
+		j3 = wrap(-0.5 * (wrap(t3,-180,180) + wrap(t4,-180,180)) , -90, 90)
+		j4 = 0.5 * (wrap(t4,-180,180) - wrap(t3,-180,180))
+		# Apply the calibration offsets saved in the yaml file
+		return self.set_joint({"j3": self._config["calibrate"]["j3"] + j3, "j4": self._config["calibrate"]["j4"] + j4}, True)
 
 
 
